@@ -1,0 +1,95 @@
+name: Release
+
+# The version in fxmanifest.lua is the trigger. Merge a bump to main and this
+# tags the commit and publishes a release with the packaged resource attached;
+# merge anything else and it does nothing. That keeps the version a server owner
+# sees in `vanishlogs` identical to the release they downloaded.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  check:
+    name: Check for a new version
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      publish: ${{ steps.version.outputs.publish }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read the manifest version
+        id: version
+        run: |
+          set -euo pipefail
+
+          version="$(sed -n "s/^version[[:space:]]*'\([^']*\)'.*/\1/p" fxmanifest.lua | head -1)"
+          if [[ -z "$version" ]]; then
+            echo "::error::could not read version from fxmanifest.lua"
+            exit 1
+          fi
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "::error::version '$version' is not semver"
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+          if git rev-parse "v$version" >/dev/null 2>&1; then
+            echo "v$version is already released; nothing to do."
+            echo "publish=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "v$version is new; it will be released."
+            echo "publish=true" >> "$GITHUB_OUTPUT"
+          fi
+
+  validate:
+    name: Validate
+    needs: check
+    if: needs.check.outputs.publish == 'true'
+    uses: ./.github/workflows/ci.yml
+
+  publish:
+    name: Publish release
+    needs: [check, validate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Package the resource
+        run: bash .github/package.sh dist
+
+      - name: Tag and publish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.check.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          git tag "v$VERSION"
+          git push origin "v$VERSION"
+
+          gh release create "v$VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
+            --title "v$VERSION" \
+            --verify-tag \
+            --generate-notes \
+            dist/vanish_logger.zip

@@ -1,0 +1,27 @@
+# Credentials come from server-only convars. Pending event spools are private.
+
+# Local convar / secret spillover
+*.env
+.env
+.env.*
+server.cfg
+
+# Editor and OS
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Build or packaging output
+dist/
+*.zip
+*.7z
+
+# Test harness bytecode
+__pycache__/
+*.pyc
+
+# Private durable pending-event spool (never ship customer logs)
+.vanishlogs-spool.json*

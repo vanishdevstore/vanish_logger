@@ -1,0 +1,65 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  # Called by release.yml so nothing is published without passing this first.
+  workflow_call:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install lupa
+        run: pip install lupa
+
+      - name: Spool and signing tests
+        run: node --test tests/store.test.cjs
+
+      - name: Queue and transport tests
+        working-directory: tests
+        run: python transport_test.py
+
+      - name: Lua compiles and the manifest is complete
+        working-directory: tests
+        run: python syntax_test.py
+
+      - name: Inventory player identity tests
+        working-directory: tests
+        run: python inventory_test.py
+
+      - name: Package builds and excludes tests
+        run: |
+          set -euo pipefail
+          bash .github/package.sh dist
+          unzip -l dist/vanish_logger.zip
+
+          if unzip -l dist/vanish_logger.zip | grep -qE 'vanish_logger/(tests|\.git)'; then
+            echo "::error::the release zip contains files it should not ship"
+            exit 1
+          fi
+          for required in fxmanifest.lua config.lua server/main.lua LICENSE; do
+            if ! unzip -l dist/vanish_logger.zip | grep -q "vanish_logger/$required"; then
+              echo "::error::the release zip is missing $required"
+              exit 1
+            fi
+          done
