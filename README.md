@@ -45,8 +45,13 @@ set vanishlogs_endpoint "https://your-vanish-logs-host"
 set vanishlogs_key      "plog_xxxxxxxx_yyyyyyyy"
 ```
 
-The endpoint takes no trailing slash; the resource posts to
-`<endpoint>/ingest/v1/events`. The key is issued from the dashboard.
+Use an HTTPS endpoint; the resource posts to `<endpoint>/ingest/v1/events`.
+Trailing slashes are removed. URLs containing credentials, queries or fragments
+are refused, and redirects are not followed. The key is issued from the dashboard.
+
+For local testing only, set `Config.allowLocalHttp = true` to allow HTTP to
+literal `127.0.0.1` or `[::1]`, with an optional port. Remote HTTP is always
+refused. Keep the ingest key in a server-only `set` convar; never use `setr` or `sets`.
 
 Everything else lives in [`config.lua`](config.lua), documented inline: batching
 thresholds, retry timing, inventory detail, and whether to record coordinates.
@@ -94,8 +99,9 @@ filter your events a second time.
 | `GetStatus`   | Queue depth, totals, last error                  |
 | `Flush`       | Send now, for a resource about to stop           |
 
-None of them throw or block: a logging call inside a gameplay path must not be
-able to break that path.
+Logging exports return `false` for invalid event arguments. Optional `context`
+and `data` values must be tables. HTTP delivery is asynchronous; disk
+checkpoints are synchronous.
 
 ## What is collected automatically
 

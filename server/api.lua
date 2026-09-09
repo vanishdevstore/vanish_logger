@@ -50,14 +50,20 @@ function LogEvent(event)
     if type(event) ~= 'table' then return false end
     if not transport then return false end
 
+    for _, field in ipairs({ 'context', 'data' }) do
+        if event[field] ~= nil and type(event[field]) ~= 'table' then return false end
+    end
+
     local channel = event.channel
     local category = event.category
     local action = event.action
 
-    if type(action) ~= 'string' then
+    if type(action) ~= 'string' or action == '' then
         Debug('rejected an event missing action')
         return false
     end
+    if channel ~= nil and (type(channel) ~= 'string' or channel == '') then return false end
+    if category ~= nil and type(category) ~= 'string' then return false end
     if type(channel) ~= 'string' and type(category) ~= 'string' then
         Debug('rejected an event with neither channel nor category')
         return false
@@ -100,6 +106,8 @@ exports('Log', LogEvent)
 ---@param event table|nil The rest of the event
 ---@return boolean
 exports('LogTo', function(channel, action, event)
+    if type(channel) ~= 'string' or channel == '' then return false end
+    if event ~= nil and type(event) ~= 'table' then return false end
     event = event or {}
     event.channel = channel
     event.action = action
@@ -111,6 +119,7 @@ end)
 ---@param event table|nil The rest of the event
 ---@return boolean
 exports('LogInventory', function(action, event)
+    if event ~= nil and type(event) ~= 'table' then return false end
     event = event or {}
     event.category = 'inventory'
     event.action = action

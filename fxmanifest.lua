@@ -4,7 +4,7 @@ lua54 'yes'
 
 author 'vanishdev'
 description 'Ships structured gameplay events to the Vanish Logs platform'
-version '1.0.2'
+version '1.0.3'
 repository 'https://github.com/vanishdevstore/vanish_logger'
 
 -- Server scripts only. Load config first and main.lua last.

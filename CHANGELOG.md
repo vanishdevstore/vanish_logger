@@ -5,6 +5,19 @@ All notable changes to this resource are documented here. This project follows
 `fxmanifest.lua` is the source of truth; merging a bump to `main` publishes a
 release.
 
+## 1.0.3
+
+### Security
+
+- Require HTTPS for remote ingest endpoints and disable HTTP redirects.
+- Allow loopback HTTP only when `Config.allowLocalHttp` is explicitly enabled
+  for testing. Embedded URL credentials, queries and fragments are rejected.
+
+### Fixed
+
+- Reject malformed event containers and invalid export arguments with `false`
+  instead of raising errors in calling resources.
+
 ## 1.0.2
 
 ### Changed

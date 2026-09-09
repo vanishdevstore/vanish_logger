@@ -10,6 +10,9 @@ Config = {
     endpointConvar = 'vanishlogs_endpoint',
     keyConvar = 'vanishlogs_key',
 
+    -- Test servers only: allow HTTP to literal 127.0.0.1 or [::1].
+    allowLocalHttp = false,
+
     -- Batch events to reduce HTTP requests.
     batch = {
         maxEvents = 200,

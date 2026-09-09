@@ -61,6 +61,18 @@ function Transport.new()
     }, Transport)
 end
 
+local function allowedEndpoint(endpoint)
+    -- Reject ambiguous URLs, embedded credentials, queries and fragments.
+    if endpoint:find('[%c%s\\?#]') then return false end
+    local scheme, authority = endpoint:match('^(https?)://([^/]+)')
+    if not authority or authority:find('@', 1, true) then return false end
+    if scheme == 'https' then return true end
+    if Config.allowLocalHttp ~= true then return false end
+    return authority == '127.0.0.1' or authority == '[::1]'
+        or authority:match('^127%.0%.0%.1:%d+$') ~= nil
+        or authority:match('^%[::1%]:%d+$') ~= nil
+end
+
 ---Read credentials on each flush so convar updates apply without a restart.
 ---@return string|nil endpoint
 ---@return string|nil key
@@ -68,10 +80,10 @@ function Transport:Credentials()
     local endpoint = GetConvar(Config.endpointConvar, '')
     local key = GetConvar(Config.keyConvar, '')
 
-    endpoint = endpoint:gsub('%s+', ''):gsub('/+$', '')
+    endpoint = endpoint:gsub('^%s+', ''):gsub('%s+$', ''):gsub('/+$', '')
     key = key:gsub('%s+', '')
 
-    if endpoint == '' or not endpoint:match('^https?://') or key == '' then
+    if not allowedEndpoint(endpoint) or key == '' then
         return nil, nil
     end
     return endpoint, key
@@ -281,7 +293,7 @@ function Transport:Send(endpoint, key)
 
     local ok, err = pcall(PerformHttpRequest, endpoint .. '/ingest/v1/events', function(status, body)
         self:HandleResponse(flight, attemptId, status, body)
-    end, 'POST', flight.body, headers)
+    end, 'POST', flight.body, headers, { followLocation = false })
 
     if not ok then
         self.sending = false
@@ -311,7 +323,7 @@ function Transport:Flush(force)
     local endpoint, key = self:Credentials()
     if not endpoint or not key then
         if not self.credentialsWarned then
-            Warn('not configured. Events are being queued. Set "%s" and "%s" in server.cfg.',
+            Warn('missing credentials or refused endpoint. Use HTTPS and set "%s" and "%s" in server.cfg. Events remain queued.',
                 Config.endpointConvar, Config.keyConvar)
             self.credentialsWarned = true
         end

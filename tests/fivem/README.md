@@ -9,6 +9,10 @@ never add it to a production startup config.
 
 Start a configured `vanish_logger` first, then from the server console:
 
+The outage probe uses loopback HTTP. On this test server only, set
+`Config.allowLocalHttp = true` in the logger's `config.lua` before starting it.
+Leave it disabled in production.
+
 1. `refresh` and `ensure vanishlogs_testbench`
 2. `vanishlogs_test run` — sends a custom inventory event twice with the same
    id, rejects a malformed event locally, and creates three water items in a

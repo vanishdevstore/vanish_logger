@@ -17,6 +17,7 @@ class Runtime:
         self.lua = LuaRuntime(unpack_returned_tuples=True)
         self.disk = disk
         self.requests = []
+        self.request_details = []
         self.timers = []
         self.fail_storage = False
         def plain(value):
@@ -35,7 +36,10 @@ class Runtime:
         g.py_decode = lambda value: self.lua.table_from(json.loads(value), recursive=True)
         g.py_save = save
         g.py_load = lambda: self.lua.table_from(disk)
-        g.py_http = lambda endpoint, callback, method, body, headers: self.requests.append((body, callback))
+        def http(endpoint, callback, method, body, headers, options):
+            self.requests.append((body, callback))
+            self.request_details.append((endpoint, plain(headers), plain(options)))
+        g.py_http = http
         g.py_timer = lambda delay, callback: self.timers.append(callback)
         self.lua.execute('''
             json={encode=function(v) return py_encode(v) end,decode=function(v) return py_decode(v) end}
@@ -65,6 +69,59 @@ class Runtime:
     def flush(self): self.lua.execute('t:Flush(true)')
 
 class DeliveryTests(unittest.TestCase):
+    def endpoint_runtime(self, endpoint, allow_local=False):
+        runtime = Runtime({})
+        runtime.lua.globals().test_endpoint = endpoint
+        runtime.lua.globals().Config.allowLocalHttp = allow_local
+        runtime.lua.execute('''
+            function GetConvar(name)
+                if name == 'vanishlogs_endpoint' then return test_endpoint end
+                return 'plog_prefix_secret'
+            end
+        ''')
+        runtime.event()
+        runtime.flush()
+        return runtime
+
+    def test_https_sends_credentials_without_following_redirects(self):
+        runtime = self.endpoint_runtime(' https://logs.example.com/prefix/ ')
+        endpoint, headers, options = runtime.request_details[0]
+        self.assertEqual(endpoint, 'https://logs.example.com/prefix/ingest/v1/events')
+        self.assertEqual(headers['Authorization'], 'Bearer plog_prefix_secret')
+        self.assertIs(options['followLocation'], False)
+        runtime.requests[0][1](302, '')
+        self.assertIsNotNone(runtime.t.inFlight)
+        self.assertEqual(len(runtime.requests), 1)
+
+    def test_http_is_refused_by_default_and_events_are_preserved(self):
+        for endpoint in ('http://logs.example.com', 'http://127.0.0.1:8787', 'http://[::1]:8787'):
+            with self.subTest(endpoint=endpoint):
+                runtime = self.endpoint_runtime(endpoint)
+                self.assertEqual(runtime.requests, [])
+                self.assertEqual(runtime.t.queue.Size(runtime.t.queue), 1)
+                self.assertIn('stable', runtime.disk['data'])
+                runtime.lua.globals().Config.signRequests = False
+                runtime.flush()
+                self.assertEqual(runtime.requests, [])
+
+    def test_local_http_requires_explicit_opt_in(self):
+        for endpoint in ('http://127.0.0.1', 'http://127.0.0.1:8787', 'http://[::1]', 'http://[::1]:8787'):
+            with self.subTest(endpoint=endpoint):
+                self.assertEqual(len(self.endpoint_runtime(endpoint, allow_local=True).requests), 1)
+
+    def test_local_http_opt_in_cannot_target_remote_or_ambiguous_urls(self):
+        for endpoint in (
+            'http://logs.example.com', 'http://192.168.1.1', 'http://localhost',
+            'http://127.0.0.1.example.com', 'http://127.0.0.1@logs.example.com',
+            'http://127.0.0.1:80@logs.example.com', 'http://[::1].example.com',
+            'http://127.0.0.1\\@logs.example.com', 'http://2130706433',
+            'https://user:password@logs.example.com', 'https://logs.example.com?key=value',
+            'https://logs.example.com#fragment', 'https://logs.exa mple.com',
+            'https://logs.example.com\n/path', 'ftp://127.0.0.1', 'https://',
+        ):
+            with self.subTest(endpoint=endpoint):
+                self.assertEqual(self.endpoint_runtime(endpoint, allow_local=True).requests, [])
+
     def test_outage_then_restart_replays_exact_body(self):
         disk={}; first=Runtime(disk); first.event(); first.flush()
         body,callback=first.requests[0]; callback(503,'unavailable')
@@ -131,19 +188,60 @@ class PublicApiTests(unittest.TestCase):
         lua = LuaRuntime(unpack_returned_tuples=True)
         lua.execute("""
             Config = { debug = false }
-            function exports(...) end
+            registeredExports = {}
+            function exports(name, fn) registeredExports[name] = fn end
             function GetCurrentResourceName() return 'vanish_logger' end
             function GetInvokingResource() return nil end
-            function ShortText(value) return value end
-            function BoundedCopy(value) return value end
-            function GetIdentifiers(value) return nil end
+            function GetResourceMetadata() return '1.0.3' end
+            function AddEventHandler(...) end
+            function GetPlayerName(...) return nil end
             function NewId() return 'generated-id' end
             function UtcNow() return '2026-09-06T00:00:00Z' end
             function Debug(...) end
         """)
+        lua.execute((ROOT/'server/limits.lua').read_text())
+        lua.execute(ordinary_lua((ROOT/'server/util.lua').read_text()))
         lua.execute((ROOT/'server/api.lua').read_text())
         lua.execute('SetTransport({Enqueue=function(_, payload) lastPayload=payload; return true end})')
         return lua
+
+    def test_malformed_containers_are_rejected_by_every_logging_export(self):
+        for field in ('context', 'data'):
+            for value in ('invalid', 42, False):
+                for name in ('Log', 'LogTo', 'LogInventory'):
+                    with self.subTest(field=field, value=value, export=name):
+                        lua = self.api()
+                        event = lua.table_from({'category': 'inventory', 'action': 'test', field: value})
+                        fn = lua.globals().registeredExports[name]
+                        args = (event,) if name == 'Log' else ('test', event)
+                        if name == 'LogTo': args = ('custom.events', 'test', event)
+                        self.assertFalse(fn(*args))
+                        self.assertIsNone(lua.globals().lastPayload)
+
+    def test_export_wrappers_reject_non_table_events(self):
+        lua = self.api()
+        for value in ('invalid', 42, False):
+            self.assertFalse(lua.globals().registeredExports.Log(value))
+            self.assertFalse(lua.globals().registeredExports.LogTo('custom.events', 'test', value))
+            self.assertFalse(lua.globals().registeredExports.LogInventory('test', value))
+
+    def test_valid_wrappers_and_context_still_work(self):
+        lua = self.api()
+        event = lua.table_from({'context': {'custom': 'kept'}, 'data': {'quantity': 1}}, recursive=True)
+        self.assertTrue(lua.globals().registeredExports.LogTo('custom.events', 'test', event))
+        self.assertEqual(lua.globals().lastPayload.context.custom, 'kept')
+        self.assertEqual(lua.globals().lastPayload.context.resource, 'vanish_logger')
+        self.assertIsNone(event.context.resource)
+        self.assertEqual(lua.globals().lastPayload.data.quantity, 1)
+        self.assertTrue(lua.globals().registeredExports.LogInventory('test', None))
+        self.assertTrue(lua.globals().registeredExports.LogTo('custom.events', 'test', None))
+
+    def test_invalid_destinations_and_actions_are_rejected(self):
+        lua = self.api()
+        for value in ('', 42, False):
+            self.assertFalse(lua.globals().registeredExports.LogTo(value, 'test', None))
+            self.assertFalse(lua.globals().registeredExports.LogInventory(value, None))
+        self.assertFalse(lua.globals().LogEvent(lua.table_from({'category': 'inventory', 'action': 'test', 'channel': False})))
 
     def test_every_platform_category_is_accepted(self):
         # A category with no shipped collector is still a category a server's
