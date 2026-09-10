@@ -18,7 +18,11 @@ class InventoryTests(unittest.TestCase):
             function AddEventHandler(name, fn) handlers[name] = fn end
             function Debug() end
             function NewId() return 'transaction' end
-            function ShortText(value) return value ~= nil and tostring(value) or nil end
+            function ShortText(value)
+                if type(value) == 'number' then value = tostring(value) end
+                if type(value) ~= 'string' or value == '' then return nil end
+                return value
+            end
             function GetPlayerName(id)
                 if id == 6 or id == 2 then return 'Account ' .. id end
             end
@@ -28,8 +32,12 @@ class InventoryTests(unittest.TestCase):
                 end
             end
             function LogEvent(event) events[#events + 1] = event end
+            inventories = { [15] = { id = 15, type = 'player', owner = 'char1:player15' } }
             exports = {
-                ox_inventory = { registerHook = function(_, name) return name end },
+                ox_inventory = {
+                    registerHook = function(_, name) return name end,
+                    GetInventory = function(_, id) return inventories[id] or false end,
+                },
                 es_extended = { getSharedObject = function()
                     return { GetPlayerFromId = function(id)
                         if not GetPlayerName(id) then return nil end
@@ -72,6 +80,21 @@ class InventoryTests(unittest.TestCase):
 
     def test_owner_identifier_fallback_is_preserved(self):
         self.assertEqual(self.transfer('char1:offline').target.characterId, 'char1:offline')
+
+    def test_disconnected_server_id_falls_back_to_inventory_owner(self):
+        # ox_inventory defers hook post-events, so the recipient can already be
+        # unresolvable by the time the event is built. The inventory still
+        # carries the persistent owner.
+        for recipient in (15, '15'):
+            self.setUp()
+            target = self.transfer(recipient).target
+            self.assertEqual(target.characterId, 'char1:player15')
+            self.assertEqual(target.identifier, 'char1:player15')
+            self.assertIsNone(target.source)
+
+    def test_ownerless_inventory_does_not_become_character_id(self):
+        self.lua.execute("inventories[15] = { id = 15, type = 'drop', owner = false }")
+        self.assertIsNone(self.transfer(15).target)
 
     def test_disconnected_server_id_does_not_become_character_id(self):
         for recipient in (99, '99'):

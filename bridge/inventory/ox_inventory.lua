@@ -70,8 +70,21 @@ local function classifyMove(payload)
     return 'item_transfer'
 end
 
----Player inventories can be server ids or framework owner identifiers.
----Resolve server ids while the player is connected, including character data.
+---Reads the persistent owner off an inventory. ox_inventory returns false for
+---ids it does not hold, so nothing is created or loaded by looking.
+---@param inventoryId number|string
+---@return string|nil
+local function inventoryOwner(inventoryId)
+    local ok, inventory = pcall(function()
+        return exports.ox_inventory:GetInventory(inventoryId)
+    end)
+    if not ok or type(inventory) ~= 'table' then return nil end
+    return ShortText(inventory.owner, 64)
+end
+
+---Player inventories can be server ids or framework owner identifiers. Server
+---ids resolve to full character data while that player is connected, and to the
+---inventory's owner once they are not.
 ---@param value number|string|nil
 ---@return table|nil
 local function resolvePlayer(value)
@@ -87,8 +100,11 @@ local function resolvePlayer(value)
         return party
     end
 
-    -- A disconnected server id is not a persistent character identifier.
-    if numeric then return nil end
+    -- A server id only identifies someone while they are connected, and ids are
+    -- recycled after a disconnect. ox_inventory defers hook post-events, so a
+    -- player can already be gone by the time an event is built; fall back to the
+    -- inventory's owner, which stays correct either way.
+    if numeric then return GetCharacterByOwner(inventoryOwner(numeric)) end
     return GetCharacterByOwner(value)
 end
 

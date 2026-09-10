@@ -5,6 +5,16 @@ All notable changes to this resource are documented here. This project follows
 `fxmanifest.lua` is the source of truth; merging a bump to `main` publishes a
 release.
 
+## 1.0.4
+
+### Fixed
+
+- Player-to-player transfers no longer drop the target when the recipient's
+  server ID cannot be resolved. ox_inventory defers hook post-events, so a
+  recipient can already be unresolvable by the time an event is built; the
+  target now falls back to the inventory's persistent owner. Inventories with
+  no owner, and IDs ox_inventory does not hold, still emit no target.
+
 ## 1.0.3
 
 ### Security
