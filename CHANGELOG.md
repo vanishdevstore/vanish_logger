@@ -5,6 +5,24 @@ All notable changes to this resource are documented here. This project follows
 `fxmanifest.lua` is the source of truth; merging a bump to `main` publishes a
 release.
 
+## 1.1.0
+
+### Added
+
+- `Config.inventory.slotShuffles`, off by default. A move that begins and ends
+  in the same inventory — tidying a bag, splitting a stack in place, giving to
+  yourself — is no longer logged. Nothing changes hands and nothing enters or
+  leaves the world, so no investigation reads one, but on a busy server they
+  are routinely the largest single slice of inventory volume. Set it to `true`
+  to restore the old behaviour.
+
+### Changed
+
+- `Config.inventory.containerOpen` now defaults to `false`. Opening a stash or
+  a trunk is high volume and says only that somebody looked; what they took is
+  already logged as a move. Existing installs that want container opens must
+  set it back to `true` after updating.
+
 ## 1.0.5
 
 ### Fixed

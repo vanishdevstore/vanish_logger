@@ -175,14 +175,42 @@ class InventoryTests(unittest.TestCase):
             self.setUp()
             self.assertIsNone(self.transfer(recipient).target)
 
-    def test_self_move_has_no_target(self):
-        self.assertIsNone(self.transfer('6').target)
-
     def test_non_player_inventory_has_no_target(self):
         self.assertIsNone(self.transfer('stash_test', to_type='stash').target)
 
     def test_failed_transfer_is_not_logged(self):
         self.assertIsNone(self.transfer(success=False))
+
+    def shuffles(self):
+        self.lua.globals().Config.inventory.slotShuffles = True
+
+    def test_slot_shuffle_is_not_logged(self):
+        self.assertIsNone(self.transfer('6'))
+
+    def test_slot_shuffle_is_dropped_whatever_the_id_type(self):
+        for sender, recipient in ((6, '6'), ('6', 6), ('stash_a', 'stash_a')):
+            self.setUp()
+            self.assertIsNone(self.transfer(recipient, sender=sender))
+
+    def test_a_real_move_survives_the_shuffle_guard(self):
+        self.assertIsNotNone(self.transfer(2))
+
+    def test_drop_is_not_mistaken_for_a_shuffle(self):
+        payload = self.lua.table_from({
+            'source': 6, 'action': 'move', 'fromInventory': 6,
+            'dropId': 'drop-1', 'fromType': 'player', 'toType': 'newdrop', 'count': 1,
+            'fromSlot': {'name': 'water', 'label': 'Water', 'slot': 3},
+        }, recursive=True)
+        self.lua.globals().handlers.swapItems(True, payload)
+        self.assertEqual(self.lua.globals().events[1].action, 'item_dropped')
+
+    def test_shuffles_are_logged_when_the_option_is_on(self):
+        self.shuffles()
+        self.assertIsNotNone(self.transfer('6'))
+
+    def test_self_move_has_no_target(self):
+        self.shuffles()
+        self.assertIsNone(self.transfer('6').target)
 
 
 if __name__ == '__main__':

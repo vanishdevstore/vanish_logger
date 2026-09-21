@@ -70,6 +70,16 @@ local function classifyMove(payload)
     return 'item_transfer'
 end
 
+---Whether a move began and ended in the same inventory. A nil on either side
+---is a drop or a pickup, so it is logged rather than discarded.
+---@param payload table The swapItems hook payload
+---@return boolean
+local function isSlotShuffle(payload)
+    local from, to = payload.fromInventory, payload.toInventory
+    if from == nil or to == nil then return false end
+    return tostring(from) == tostring(to)
+end
+
 ---Reads the persistent owner off an inventory. ox_inventory returns false for
 ---ids it does not hold, so nothing is created or loaded by looking.
 ---@param inventoryId number|string
@@ -169,6 +179,7 @@ local function register()
 
     AddEventHandler(swapHookId, function(success, payload)
         if not success or type(payload) ~= 'table' then return end
+        if not Config.inventory.slotShuffles and isSlotShuffle(payload) then return end
 
         local action = classifyMove(payload)
         local fromSlot = readSlot(payload.fromSlot)

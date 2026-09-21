@@ -39,25 +39,16 @@ Config = {
     -- Controls automatic collection only. Exported events are filtered by the dashboard.
     inventory = {
         enabled = true,
-        containerOpen = true,  -- stash/trunk/glovebox opens (high volume)
+        slotShuffles = false,   -- moves that start and end in the same inventory
+        containerOpen = false,  -- stash/trunk/glovebox opens (high volume)
         itemUse = true,
         crafting = true,
         shopPurchases = true,
         includeMetadata = true, -- serials, durability; truncated if oversized
         maxMetadataKeys = 12,   -- 0 drops metadata entirely
-        -- Scripts whose item creation is not worth logging, matched against
-        -- the resource ox_inventory reports as the creator, ignoring case.
-        --
-        -- Production and payout loops are the reason this exists: a drug
-        -- script granting an item every few seconds can be most of a server's
-        -- entire log volume, and not one of those rows is something anyone
-        -- investigates. Dropping them here costs no bandwidth and no storage.
-        -- Weapon creation is never ignored, whatever is listed.
-        --
-        -- Find the names to put here by grouping logged items by source; the
-        -- dashboard shows it as the Source column once attribution is on.
+        -- Creating scripts not worth logging, matched case-insensitively.
+        -- Weapons are never ignored.
         ignoreCreatedBy = {},
-        -- Coordinate collection adds native calls to each event.
-        coords = false,
+        coords = false,         -- adds native calls to each event
     },
 }
