@@ -31,6 +31,7 @@ class InventoryTests(unittest.TestCase):
                     return { source = id, name = GetPlayerName(id), license = 'license:' .. id }
                 end
             end
+            function BoundedCopy(value) return value end
             function LogEvent(event) events[#events + 1] = event end
             inventories = { [15] = { id = 15, type = 'player', owner = 'char1:player15' } }
             exports = {
@@ -63,6 +64,79 @@ class InventoryTests(unittest.TestCase):
         }, recursive=True)
         self.lua.globals().handlers.swapItems(success, payload)
         return self.lua.globals().events[1]
+
+    def create(self, inventory_id=15, created_by='Sync_DrugsCreator', success=True,
+               item_name='drug_yerkys'):
+        """Fire ox_inventory's createItem hook the way a script granting an item does."""
+        payload = self.lua.table_from({
+            'inventoryId': inventory_id,
+            'resource': created_by,
+            'count': 3,
+            'item': {'name': item_name, 'label': 'Yerkys'},
+        }, recursive=True)
+        self.lua.globals().handlers.createItem(success, payload)
+        return self.lua.globals().events[1]
+
+    # The whole point of logging item creation is answering "where did this
+    # come from". ox_inventory is the plumbing every item passes through, so
+    # naming it as the resource answers nothing; the script that called for the
+    # item is the attribution worth storing, and the platform already indexes
+    # `resource` as a searchable subject.
+    def test_created_item_names_the_script_that_made_it(self):
+        self.assertEqual(self.create(created_by='Sync_DrugsCreator').resource,
+                         'Sync_DrugsCreator')
+
+    def test_created_item_falls_back_to_ox_inventory_when_unattributed(self):
+        self.assertEqual(self.create(created_by=None).resource, 'ox_inventory')
+
+    # `inventoryId` arrives as a number for a player inventory, and the owner
+    # lookup only accepted strings — so every created item logged with no actor
+    # at all and rendered as "Someone received ...".
+    def test_created_item_resolves_the_owner_of_a_numeric_inventory(self):
+        for inventory_id in (15, '15'):
+            self.setUp()
+            actor = self.create(inventory_id).actor
+            self.assertIsNotNone(actor, 'a numeric inventory id must still resolve an owner')
+            self.assertEqual(actor.characterId, 'char1:player15')
+
+    def test_created_item_resolves_a_connected_player(self):
+        self.assertEqual(self.create(6).actor.name, 'CJ Jones')
+
+    def test_created_item_without_a_known_owner_has_no_actor(self):
+        self.lua.execute("inventories[15] = { id = 15, type = 'drop', owner = false }")
+        self.assertIsNone(self.create(15).actor)
+
+    def test_failed_creation_is_not_logged(self):
+        self.assertIsNone(self.create(success=False))
+
+    # Volume control at the source. A production loop can emit tens of
+    # thousands of creations an hour, and they are worth nothing to an
+    # investigation; dropping them here costs no bandwidth and no ingest work.
+    def test_ignored_sources_are_not_logged(self):
+        self.lua.execute("Config.inventory.ignoreCreatedBy = { 'Sync_DrugsCreator' }")
+        self.assertIsNone(self.create(created_by='Sync_DrugsCreator'))
+
+    def test_ignoring_a_source_leaves_the_others_alone(self):
+        self.lua.execute("Config.inventory.ignoreCreatedBy = { 'Sync_DrugsCreator' }")
+        self.assertEqual(self.create(created_by='palms_blackmarket').resource,
+                         'palms_blackmarket')
+
+    # Resource names get typed into a config by hand; a casing slip that
+    # silently keeps a firehose running is a bad way to find out.
+    def test_ignoring_a_source_is_case_insensitive(self):
+        self.lua.execute("Config.inventory.ignoreCreatedBy = { 'sync_drugscreator' }")
+        self.assertIsNone(self.create(created_by='Sync_DrugsCreator'))
+
+    # A production loop is noise; a gun coming out of one is not. Volume is
+    # not the reason to keep weapon creation - 553 in six hours against 70,000
+    # item creations - the reason is that it is the row an investigation
+    # starts from.
+    def test_weapon_creation_survives_an_ignored_source(self):
+        self.lua.execute("Config.inventory.ignoreCreatedBy = { 'Sync_DrugsCreator' }")
+        event = self.create(created_by='Sync_DrugsCreator', item_name='WEAPON_PISTOL')
+        self.assertIsNotNone(event, 'weapon creation must never be dropped by the ignore list')
+        self.assertEqual(event.action, 'weapon_added')
+        self.assertEqual(event.resource, 'Sync_DrugsCreator')
 
     def test_money_give_resolves_recipient_server_id(self):
         for recipient in (2, '2'):
