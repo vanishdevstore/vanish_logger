@@ -5,6 +5,26 @@ All notable changes to this resource are documented here. This project follows
 `fxmanifest.lua` is the source of truth; merging a bump to `main` publishes a
 release.
 
+## 1.0.5
+
+### Fixed
+
+- Created items are attributed to the player who received them and the script
+  that made them. The actor was resolved with a helper that only accepts an
+  owner string, while a player inventory id arrives as a number, so every
+  created item logged without one; it now resolves through the same path as
+  the other hooks and falls back to the inventory's persistent owner once the
+  player has disconnected. The event's `resource` is now the script that asked
+  for the item rather than a hardcoded `ox_inventory`, which every item passes
+  through. `createdBy` stays in the payload.
+
+### Added
+
+- `Config.inventory.ignoreCreatedBy`, a list of scripts whose item creation is
+  not logged, matched ignoring case and empty by default. A production or
+  payout loop can be most of a server's log volume and none of it is something
+  anyone investigates. Weapon creation is never ignored, whatever is listed.
+
 ## 1.0.4
 
 ### Fixed

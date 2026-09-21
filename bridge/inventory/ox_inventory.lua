@@ -114,6 +114,25 @@ local function resolveActor(payload)
     return resolvePlayer(payload.source)
 end
 
+---Whether item creation by this resource should be discarded.
+---
+---Matched without case because these names are typed into a config by hand,
+---and a casing slip that silently leaves a firehose running is an expensive
+---way to find out about the mistake.
+---@param createdBy string|nil
+---@return boolean
+local function isIgnoredSource(createdBy)
+    if not createdBy then return false end
+    local ignore = Config.inventory.ignoreCreatedBy
+    if type(ignore) ~= 'table' then return false end
+
+    local needle = string.lower(createdBy)
+    for _, entry in ipairs(ignore) do
+        if type(entry) == 'string' and string.lower(entry) == needle then return true end
+    end
+    return false
+end
+
 ---@param payload table
 ---@param action string
 ---@return table|nil
@@ -203,13 +222,33 @@ local function register()
 
         local item = payload.item or {}
         local name = ShortText(item.name, 64)
+        local weapon = isWeapon(name)
+
+        -- The resource that asked for the item, which is the answer to "where
+        -- did this come from". Weapons are never discarded, however the ignore
+        -- list is configured: they are the smallest slice of this category by
+        -- volume and the one most often at the centre of an investigation.
+        local createdBy = ShortText(payload.resource, 64)
+        if not weapon and isIgnoredSource(createdBy) then return end
 
         LogEvent({
             category = 'inventory',
-            action = isWeapon(name) and 'weapon_added' or 'item_added',
-            severity = isWeapon(name) and 'notice' or nil,
-            resource = 'ox_inventory',
-            actor = GetCharacterByOwner(payload.inventoryId),
+            action = weapon and 'weapon_added' or 'item_added',
+            severity = weapon and 'notice' or nil,
+            -- The creating script, not ox_inventory. Every item in the game
+            -- passes through ox_inventory, so naming it identified nothing;
+            -- the dashboard indexes `resource` as a searchable subject, so
+            -- attributing it here is what makes `resource:some_script`
+            -- answer "what is flooding my logs" and "where did this item
+            -- come from" at the same time.
+            resource = createdBy or 'ox_inventory',
+            -- `inventoryId` is a number for a player inventory, and
+            -- `GetCharacterByOwner` only accepts an owner string, so this
+            -- resolved to nil for every created item and the dashboard
+            -- rendered them all as "Someone received ...". `resolvePlayer`
+            -- handles both shapes, falling back to the inventory's persistent
+            -- owner when the player has already disconnected.
+            actor = resolvePlayer(payload.inventoryId),
             context = {
                 inventory = { id = ShortText(payload.inventoryId, 64) },
             },
@@ -219,8 +258,9 @@ local function register()
                 quantity = tonumber(payload.count),
                 metadata = Config.inventory.includeMetadata
                     and BoundedCopy(payload.metadata, Config.inventory.maxMetadataKeys) or nil,
-                -- Record which resource created the item.
-                createdBy = ShortText(payload.resource, 64),
+                -- Kept alongside `resource` so anything already reading it
+                -- out of the payload keeps working.
+                createdBy = createdBy,
             },
         })
     end)
