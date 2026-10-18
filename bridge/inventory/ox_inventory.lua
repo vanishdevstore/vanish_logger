@@ -100,14 +100,7 @@ end
 local function resolvePlayer(value)
     local numeric = tonumber(value)
     if numeric and numeric > 0 and GetPlayerName(numeric) then
-        local party = GetIdentifiers(numeric) or { source = numeric }
-        local character = GetCharacterInfo(numeric)
-        if character then
-            for key, value in pairs(character) do
-                if value ~= nil then party[key] = value end
-            end
-        end
-        return party
+        return PlayerParty(numeric) or { source = numeric }
     end
 
     -- A server id only identifies someone while they are connected, and ids are
@@ -141,6 +134,35 @@ local function isIgnoredSource(createdBy)
         if type(entry) == 'string' and string.lower(entry) == needle then return true end
     end
     return false
+end
+
+---Account items (cash, here) that ESX creates when a script pays a player.
+---The ESX collector logs that payment with its reason, so the item creation
+---would count it twice. Cash created directly through ox_inventory still logs.
+---@return table<string, true>
+local function esxAccountItems()
+    local items = {}
+    if not Config.collectors.esx then return items end
+
+    local ok, names = pcall(json.decode, GetConvar('inventory:accounts', '["money"]'))
+    if not ok or type(names) ~= 'table' then return items end
+
+    for _, name in ipairs(names) do
+        if type(name) == 'string' then items[name] = true end
+    end
+    return items
+end
+
+---ox_inventory's itemFilter for the watchlist, or nil to hear every use.
+---@return table<string, true>|nil
+local function usedItemFilter()
+    if Config.inventory.itemUse then return nil end
+
+    local filter = {}
+    for _, name in ipairs(Config.inventory.usedWatchlist or {}) do
+        if type(name) == 'string' then filter[name:lower()] = true end
+    end
+    return next(filter) and filter or nil
 end
 
 ---@param payload table
@@ -228,6 +250,8 @@ local function register()
     end, { print = false })
     hookIds[#hookIds + 1] = createHookId
 
+    local accountItems = esxAccountItems()
+
     AddEventHandler(createHookId, function(success, payload)
         if not success or type(payload) ~= 'table' then return end
 
@@ -241,6 +265,7 @@ local function register()
         -- volume and the one most often at the centre of an investigation.
         local createdBy = ShortText(payload.resource, 64)
         if not weapon and isIgnoredSource(createdBy) then return end
+        if accountItems[name] and createdBy == 'es_extended' then return end
 
         LogEvent({
             category = 'inventory',
@@ -297,7 +322,10 @@ local function register()
         end, { print = false })
     end
 
-    if Config.inventory.itemUse then
+    -- The filter is applied inside ox_inventory, so an unwatched use never
+    -- reaches this resource at all.
+    local usedFilter = usedItemFilter()
+    if Config.inventory.itemUse or usedFilter then
         hookIds[#hookIds + 1] = ox:registerHook('usingItem', function(payload)
             local item = readSlot(payload.item)
             LogEvent({
@@ -318,7 +346,7 @@ local function register()
                 },
             })
             return true
-        end, { print = false })
+        end, { print = false, itemFilter = usedFilter })
     end
 
     if Config.inventory.shopPurchases then

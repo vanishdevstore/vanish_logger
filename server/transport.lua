@@ -128,8 +128,10 @@ function Transport:Enqueue(event)
         self.totals.dropped += 1
     end
 
-    -- Flush early on a burst rather than waiting out the interval.
-    if self.queue:Size() >= Config.batch.maxEvents then
+    -- Flush early on a burst rather than waiting out the interval, but only
+    -- when a request can go out: otherwise a flush just rewrites the spool,
+    -- and on a busy server that was a full-queue disk write per event.
+    if self.queue:Size() >= Config.batch.maxEvents and self:ReadyToSend() then
         self:Flush(false)
     end
 
@@ -312,13 +314,36 @@ function Transport:Send(endpoint, key)
     end)
 end
 
+---Whether a request could be sent right now.
+---@return boolean
+function Transport:ReadyToSend()
+    return not self.sending and self.nextAttemptAt <= GetGameTimer()
+end
+
+---Nothing is about to be sent, so keep the spool fresh at a bounded rate:
+---each checkpoint rewrites the whole queue synchronously, and during an
+---outage the queue is at its largest.
+function Transport:CheckpointIfDue()
+    local interval = Config.batch.idleCheckpointInterval or 0
+    if self.lastCheckpointAt and GetGameTimer() - self.lastCheckpointAt < interval then return end
+    self:Checkpoint()
+end
+
 ---Sends the next batch if one is due.
 ---@param force? boolean Ignore backoff, used on shutdown
 function Transport:Flush(force)
-    if self.sending then self:Checkpoint() return end
+    if self.sending then
+        self:CheckpointIfDue()
+        return
+    end
+
+    if not force and self.nextAttemptAt > GetGameTimer() then
+        self:CheckpointIfDue()
+        return
+    end
+
     -- Checkpoint before sending so a crash can replay the batch.
     if not self:Checkpoint() then return end
-    if not force and self.nextAttemptAt > GetGameTimer() then return end
 
     local endpoint, key = self:Credentials()
     if not endpoint or not key then
@@ -356,6 +381,7 @@ end
 function Transport:Stop()
     if not self.running then return end
     self.running = false
+    self:Checkpoint()
     self:Flush(true)
 end
 
@@ -407,6 +433,7 @@ function Transport:Checkpoint()
 
     self.storageError = nil
     self.dirty = false
+    self.lastCheckpointAt = GetGameTimer()
     return true
 end
 

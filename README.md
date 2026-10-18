@@ -32,7 +32,8 @@ resource still runs and the `Log` exports still work for your own scripts.
    it before this resource.
 3. Set the endpoint and key (below), then restart.
 
-Run `vanishlogs` in the server console to confirm it is connected.
+Run `vanishlogs` in the server console to confirm it is connected, and
+`vanishlogs top` to see which events are busiest.
 
 ## Configuration
 
@@ -84,8 +85,10 @@ exports.vanish_logger:Log({
 })
 ```
 
-`actor` and `target` take a server id and resolve identifiers for you, or a
-table if you already have them. Categories are
+`actor` and `target` take a server id and resolve identifiers and the current
+character for you, an ESX character identifier, a name, or a table if you
+already have them. `action` is normalised to snake_case, and `fields` takes
+Discord-style `{ name, value }` rows and flattens them into `data`. Categories are
 `inventory`, `money`, `player`, `vehicle`, `property`, `staff`, `security` and
 `system`; an unknown one is refused locally rather than costing a round trip.
 What a server actually stores is a dashboard setting — this resource does not
@@ -96,6 +99,7 @@ filter your events a second time.
 | `Log`         | Submit an event. Returns `true` when queued.     |
 | `LogTo`       | `LogTo(channel, action, event)`                  |
 | `LogInventory`| `LogInventory(action, event)`                    |
+| `LogCommand`  | `LogCommand(source, command, args, target, data)`, an admin command under `staff` |
 | `GetStatus`   | Queue depth, totals, last error                  |
 | `Flush`       | Send now, for a resource about to stop           |
 
@@ -105,10 +109,20 @@ checkpoints are synchronous.
 
 ## What is collected automatically
 
-Only `ox_inventory`, through its own `registerHook` API — item movements,
-drops, pickups, stash/trunk/glovebox transfers, item creation, container opens,
-item use, crafting, and shop purchases. Everything else is up to your own
-resources and the exports above.
+- `ox_inventory`, through its own `registerHook` API — item movements, drops,
+  pickups, stash/trunk/glovebox transfers, item creation, container opens, item
+  use, crafting, and shop purchases.
+- The collectors in `Config.collectors`, from events those resources already
+  fire, each idle when its resource is missing:
+
+| Collector     | Category            | What                                                                   |
+| ------------- | ------------------- | ---------------------------------------------------------------------- |
+| `connections` | `player`            | Joins, and drops with their reason                                     |
+| `esx`         | `money`, `player`   | Every account change with its reason and script; jobs, groups, characters |
+| `txadmin`     | `staff`, `security` | Bans, kicks, warns, revokes, heals, announcements, restarts, console, menu actions |
+| `doors`       | `property`          | ox_doorlock locks and unlocks by players                               |
+
+Everything else is up to your own resources and the exports above.
 
 ## Durability
 
@@ -116,12 +130,27 @@ Pending events are checkpointed to a private `.vanishlogs-spool.json` in the
 resource directory, before each send, on the flush interval, and at shutdown. A
 restart restores pending events and the exact in-flight body; the API
 deduplicates on event id, so a replayed batch is stored once. A sudden crash can
-still lose events queued since the last checkpoint — normally up to two seconds.
+still lose events queued since the last checkpoint — normally up to two seconds,
+and up to `batch.idleCheckpointInterval` (10 s) while the API is unreachable.
 
 Keep the resource directory writable, and keep the spool when upgrading or
 moving the resource. **Never distribute the spool**: it contains customer event
-data. Checkpoint writes are synchronous, so profile frame time under your own
-workload if you run a large server.
+data. Checkpoint writes are synchronous, which is why they are bounded while a
+request is in flight or retrying rather than taken per event.
+
+## Volume on large servers
+
+Events are sent in batches of up to 200, at most every two seconds, never one
+request per event. What decides the volume is how many events there are:
+
+- Repeats are folded (`Config.coalesce`): the first is sent at once, and the
+  rest of a run arrive as one event with their totals and `data.repeats`.
+- Each player is capped at `Config.perPlayerPerMinute` events; the excess is
+  dropped and reported once as `security` / `rate_limit_triggered`.
+- Item use is off by default; `usedWatchlist` names the items worth logging.
+- `vanishlogs top` shows the busiest event types per minute. Tune with
+  `ignoreCreatedBy`, `usedWatchlist`, the collector switches, or a channel
+  pause in the dashboard.
 
 If the spool cannot be read or fails its checksum, the resource stops sending
 and says so rather than discarding it, so you can recover the file.
@@ -135,11 +164,13 @@ server/limits.lua           Payload caps, mirrored from the API
 server/util.lua             Logging, ids, identifiers, bounded copying
 server/queue.lua            Bounded FIFO queue
 server/transport.lua        Batching, HTTP, retry/backoff, checkpoints
+server/shaping.lua          Folding repeats, the per-player ceiling, volume counters
 server/store.js             Atomic spool writes and HMAC signing
 server/api.lua              The exports above
 server/main.lua             Wiring and the `vanishlogs` console command
 bridge/framework/esx.lua    Character identity
 bridge/inventory/ox_inventory.lua   The inventory collector
+bridge/collectors/*.lua             Connection, ESX, txAdmin and door collectors
 ```
 
 ## Development
