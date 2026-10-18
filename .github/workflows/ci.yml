@@ -47,6 +47,14 @@ jobs:
         working-directory: tests
         run: python inventory_test.py
 
+      - name: Collector tests
+        working-directory: tests
+        run: python collectors_test.py
+
+      - name: Shaping tests
+        working-directory: tests
+        run: python shaping_test.py
+
       - name: Package builds and excludes tests
         run: |
           set -euo pipefail

@@ -153,6 +153,48 @@ class DeliveryTests(unittest.TestCase):
         disk={}; runtime=Runtime(disk); runtime.event(); runtime.lua.execute('t:Stop()')
         restored=Runtime(disk); self.assertEqual(restored.t.recovered,1)
 
+    def count_saves(self, runtime):
+        saves = []
+        def save(_, data):
+            saves.append(len(data))
+            runtime.disk['data'] = data
+            return runtime.lua.table_from({'ok': True})
+        runtime.lua.globals().exports.test.SavePendingLogs = save
+        return saves
+
+    def test_a_burst_during_a_slow_request_does_not_rewrite_the_spool_per_event(self):
+        # A busy server fills the queue while one request is still out. Each of
+        # these events used to serialise the whole queue to disk on the server
+        # thread: 801 rewrites for 1000 events.
+        runtime = Runtime({})
+        for i in range(10): runtime.event(f'warm{i}')
+        self.assertTrue(runtime.t.sending)
+        saves = self.count_saves(runtime)
+        for i in range(500): runtime.event(f'burst{i}')
+        self.assertLessEqual(len(saves), 1)
+
+    def test_an_outage_rewrites_the_spool_on_an_interval(self):
+        runtime = Runtime({})
+        runtime.lua.globals().Config.retry.baseDelay = 60000
+        runtime.event()
+        runtime.flush()
+        runtime.requests[0][1](503, 'unavailable')
+        saves = self.count_saves(runtime)
+        for i in range(30): runtime.event(f'e{i}')
+        runtime.lua.execute('t:Flush(false)')
+        self.assertEqual(len(saves), 0)
+        runtime.lua.execute('function GetGameTimer() return 100000 + Config.batch.idleCheckpointInterval end')
+        runtime.lua.execute('t:Flush(false)')
+        self.assertEqual(len(saves), 1)
+
+    def test_shutdown_checkpoints_even_while_a_request_is_in_flight(self):
+        disk = {}
+        runtime = Runtime(disk)
+        for i in range(10): runtime.event(f'warm{i}')
+        runtime.event('late')
+        runtime.lua.execute('t:Stop()')
+        self.assertIn('late', disk['data'])
+
     def test_fractional_receipt_does_not_discard_the_batch(self):
         runtime=Runtime({}); runtime.event(); runtime.flush()
         runtime.requests[0][1](202,'{"accepted":0.5,"duplicates":0.5,"rejected":0}')
@@ -198,9 +240,13 @@ class PublicApiTests(unittest.TestCase):
             function NewId() return 'generated-id' end
             function UtcNow() return '2026-09-06T00:00:00Z' end
             function Debug(...) end
+            function GetResourceState() return 'missing' end
+            function GetGameTimer() return clock or 0 end function CreateThread() end function Wait() end
         """)
         lua.execute((ROOT/'server/limits.lua').read_text())
         lua.execute(ordinary_lua((ROOT/'server/util.lua').read_text()))
+        lua.execute((ROOT/'bridge/framework/esx.lua').read_text())
+        lua.execute(ordinary_lua((ROOT/'server/shaping.lua').read_text()))
         lua.execute((ROOT/'server/api.lua').read_text())
         lua.execute('SetTransport({Enqueue=function(_, payload) lastPayload=payload; return true end})')
         return lua
@@ -270,5 +316,70 @@ class PublicApiTests(unittest.TestCase):
             lua.table_from({'channel': 'drugs.sales', 'action': 'sold'})))
         self.assertEqual(lua.globals().lastPayload['channel'], 'drugs.sales')
         self.assertIsNone(lua.globals().lastPayload['category'])
+
+    def test_display_titles_become_snake_case_actions(self):
+        # Vendor webhook funnels only carry a title; the API refuses anything
+        # that is not snake_case, which would silently drop the event.
+        lua = self.api()
+        log_to = lua.globals().registeredExports.LogTo
+        self.assertTrue(log_to('vehicle.dealerships', 'New Vehicle Purchase', None))
+        self.assertEqual(lua.globals().lastPayload.action, 'new_vehicle_purchase')
+        self.assertTrue(log_to('crime.fraud', '📌 [Card Sold] ', None))
+        self.assertEqual(lua.globals().lastPayload.action, 'card_sold')
+        self.assertFalse(log_to('crime.fraud', '!!!', None))
+
+    def test_vendor_severities_are_mapped_and_unknown_ones_dropped(self):
+        lua = self.api()
+        for given, expected in (('success', 'info'), ('danger', 'warning'), ('ERROR', 'warning'),
+                                ('critical', 'critical'), ('purple', None)):
+            with self.subTest(severity=given):
+                event = lua.table_from({'category': 'system', 'action': 'test', 'severity': given})
+                self.assertTrue(lua.globals().LogEvent(event))
+                self.assertEqual(lua.globals().lastPayload.severity, expected)
+
+    def test_webhook_fields_are_flattened_into_data(self):
+        lua = self.api()
+        event = lua.table_from({
+            'data': {'plate': 'KEPT'},
+            'fields': [
+                {'name': 'Amount Paid', 'value': '**$1,250**'},
+                {'key': 'Plate', 'value': 'AB 123'},
+                {'name': 'Seller Name', 'value': '-'},
+            ],
+        }, recursive=True)
+        self.assertTrue(lua.globals().registeredExports.LogTo('vehicle.dealerships', 'purchase', event))
+        data = lua.globals().lastPayload.data
+        self.assertEqual(data.amount_paid, 1250)
+        self.assertEqual(data.amount, 1250)
+        self.assertEqual(data.plate, 'KEPT')
+        self.assertEqual(data.seller_name, '-')
+
+    def test_parties_resolve_from_the_shapes_vendor_scripts_pass(self):
+        lua = self.api()
+        cases = (
+            (0, {'name': 'Console'}),
+            ('AdminAccount', {'name': 'AdminAccount'}),
+            ('char1:abc', {'identifier': 'char1:abc', 'characterId': 'char1:abc'}),
+            ('license:xyz', {'license': 'license:xyz'}),
+        )
+        for actor, expected in cases:
+            with self.subTest(actor=actor):
+                event = lua.table_from({'category': 'staff', 'action': 'test', 'actor': actor})
+                self.assertTrue(lua.globals().LogEvent(event))
+                party = lua.globals().lastPayload.actor
+                self.assertEqual({k: party[k] for k in party}, expected)
+
+    def test_admin_commands_map_to_staff_actions(self):
+        lua = self.api()
+        log_command = lua.globals().registeredExports.LogCommand
+        self.assertTrue(log_command(0, 'setgroup', '12 admin', None))
+        payload = lua.globals().lastPayload
+        self.assertEqual(payload.category, 'staff')
+        self.assertEqual(payload.action, 'permission_changed')
+        self.assertEqual(payload.data.command, '/setgroup 12 admin')
+        self.assertTrue(log_command(0, 'clearinv', lua.table_from(['7']), None))
+        self.assertEqual(lua.globals().lastPayload.action, 'command_executed')
+        self.assertEqual(lua.globals().lastPayload.data.command, '/clearinv 7')
+        self.assertFalse(log_command(0, '', None, None))
 
 if __name__ == '__main__': unittest.main()

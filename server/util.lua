@@ -96,6 +96,12 @@ AddEventHandler('playerDropped', function()
     identifierCache[source] = nil
 end)
 
+-- Drop handlers that log after this one re-cache the leaving player, and ids
+-- are recycled, so a joining player must never inherit that entry.
+AddEventHandler('playerJoining', function()
+    identifierCache[source] = nil
+end)
+
 ---Collect persistent identifiers and the current server ID.
 ---Server IDs are reused after disconnect. IP addresses are excluded.
 ---@param playerId number|string The FiveM server id
@@ -130,4 +136,87 @@ end
 ---@param playerId number
 function ClearIdentifierCache(playerId)
     identifierCache[tonumber(playerId) or 0] = nil
+end
+
+---A connected player's identifiers with their current character merged in.
+---Returns a fresh table: the identifier cache outlives a character switch, and
+---the character fields must not.
+---@param playerId number|string The FiveM server id
+---@return table|nil
+function PlayerParty(playerId)
+    local identifiers = GetIdentifiers(playerId)
+    if not identifiers then return nil end
+
+    local party = {}
+    for key, value in pairs(identifiers) do party[key] = value end
+
+    local character = GetCharacterInfo(identifiers.source)
+    if character then
+        for key, value in pairs(character) do
+            if value ~= nil then party[key] = value end
+        end
+        -- Staff search by either name: the character's, or the one txAdmin shows.
+        if character.name and identifiers.name and character.name ~= identifiers.name then
+            party.name = ('%s (%s)'):format(character.name, identifiers.name)
+        end
+    end
+
+    return party
+end
+
+---Turns a display title such as "New Vehicle Purchase" into the snake_case
+---action the API requires, because many vendor log funnels only carry a title.
+---@param value any
+---@return string|nil
+function NormaliseAction(value)
+    if type(value) ~= 'string' then return nil end
+    -- Explicit ranges: %w follows the C locale, which can count UTF-8 bytes as letters.
+    local action = value:lower():gsub('[^a-z0-9]+', '_'):gsub('^[^a-z]+', ''):gsub('_+$', '')
+    if action == '' then return nil end
+    return action:sub(1, 64)
+end
+
+local SEVERITIES = {
+    debug = 'debug', info = 'info', notice = 'notice', warning = 'warning', critical = 'critical',
+    success = 'info', warn = 'warning', error = 'warning', danger = 'warning',
+}
+
+---Maps the levels vendor scripts use onto the five the API accepts.
+---@param value any
+---@return string|nil
+function NormaliseSeverity(value)
+    if type(value) ~= 'string' then return nil end
+    return SEVERITIES[value:lower()]
+end
+
+-- Webhook field titles that mean a column the dashboard indexes.
+local FIELD_ALIASES = {
+    amount_paid = 'amount', total_cost = 'amount', cost = 'amount', total = 'amount',
+    quantity = 'count', vehicle = 'model',
+}
+
+---Flattens Discord-style embed fields ({ name|key, value }) into event data,
+---so a funnel built for webhooks can log without restating every field.
+---Money-looking strings such as "$1,000" become numbers.
+---@param fields table
+---@param data table|nil Existing data; explicit keys win over fields
+---@return table
+function FieldsToData(fields, data)
+    data = data or {}
+    for _, field in ipairs(fields) do
+        local key = type(field) == 'table' and NormaliseAction(field.name or field.key)
+        if key then
+            local value = field.value
+            if type(value) == 'string' then
+                value = value:gsub('[%*`]', '')
+                if value:match('^%$?[%d,]+%.?%d*$') then
+                    value = tonumber((value:gsub('[%$,]', ''))) or value
+                end
+            end
+            if data[key] == nil then data[key] = value end
+            local alias = FIELD_ALIASES[key]
+            if alias and data[alias] == nil then data[alias] = value end
+        end
+    end
+    return data
 end

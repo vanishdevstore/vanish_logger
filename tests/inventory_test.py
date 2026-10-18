@@ -4,15 +4,25 @@ from pathlib import Path
 
 from lupa import LuaRuntime
 
+from transport_test import ordinary_lua
+
 ROOT = Path(__file__).resolve().parents[1]
 
 
 class InventoryTests(unittest.TestCase):
     def setUp(self):
         self.lua = LuaRuntime(unpack_returned_tuples=True)
+        # The real PlayerParty, loaded first so the stubs below replace the
+        # natives-backed helpers it calls.
+        self.lua.execute("function GetCurrentResourceName() return 'vanish_logger' end"
+                         " function AddEventHandler() end")
+        self.lua.execute(ordinary_lua((ROOT / 'server/util.lua').read_text()))
         self.lua.execute('''
-            handlers = {}; events = {}
+            handlers = {}; events = {}; hooks = {}; playerLookups = 0
             function GetResourceState() return 'started' end
+            function GetConvar(_, default) return default end
+            function GetGameTimer() return 0 end
+            json = { decode = function() return { 'money' } end }
             function GetCurrentResourceName() return 'vanish_logger' end
             function CreateThread(fn) fn() end
             function AddEventHandler(name, fn) handlers[name] = fn end
@@ -36,11 +46,15 @@ class InventoryTests(unittest.TestCase):
             inventories = { [15] = { id = 15, type = 'player', owner = 'char1:player15' } }
             exports = {
                 ox_inventory = {
-                    registerHook = function(_, name) return name end,
+                    registerHook = function(_, name, fn, options)
+                        hooks[name] = { fn = fn, options = options }
+                        return name
+                    end,
                     GetInventory = function(_, id) return inventories[id] or false end,
                 },
                 es_extended = { getSharedObject = function()
                     return { GetPlayerFromId = function(id)
+                        playerLookups = playerLookups + 1
                         if not GetPlayerName(id) then return nil end
                         return {
                             identifier = 'char1:player' .. id,
@@ -100,11 +114,34 @@ class InventoryTests(unittest.TestCase):
             self.assertEqual(actor.characterId, 'char1:player15')
 
     def test_created_item_resolves_a_connected_player(self):
-        self.assertEqual(self.create(6).actor.name, 'CJ Jones')
+        self.assertEqual(self.create(6).actor.name, 'CJ Jones (Account 6)')
 
     def test_created_item_without_a_known_owner_has_no_actor(self):
         self.lua.execute("inventories[15] = { id = 15, type = 'drop', owner = false }")
         self.assertIsNone(self.create(15).actor)
+
+    # Cash is an ox_inventory item here. When ESX pays a player it creates the
+    # item, and the ESX collector has already logged that payment with its
+    # reason; logging the creation too counted every payment twice.
+    def test_cash_paid_through_esx_is_not_logged_twice(self):
+        self.assertIsNone(self.create(6, created_by='es_extended', item_name='money'))
+
+    def test_cash_created_directly_through_ox_inventory_still_logs(self):
+        self.assertEqual(self.create(6, created_by='some_job', item_name='money').resource, 'some_job')
+
+    def test_item_use_is_filtered_inside_ox_inventory_to_the_watchlist(self):
+        options = self.lua.globals().hooks.usingItem.options
+        self.assertTrue(options.itemFilter.lockpick)
+        self.assertIsNone(options.itemFilter.water)
+
+    # Every lookup copies a whole xPlayer across the resource boundary.
+    def test_a_player_is_looked_up_once_until_their_character_changes(self):
+        for _ in range(5):
+            self.lua.globals().GetCharacterInfo(6)
+        self.assertEqual(self.lua.globals().playerLookups, 1)
+        self.lua.globals().handlers['esx:setJob'](6)
+        self.lua.globals().GetCharacterInfo(6)
+        self.assertEqual(self.lua.globals().playerLookups, 2)
 
     def test_failed_creation_is_not_logged(self):
         self.assertIsNone(self.create(success=False))
@@ -144,8 +181,8 @@ class InventoryTests(unittest.TestCase):
                 self.setUp()
                 event = self.transfer(recipient)
                 self.assertEqual(event.action, 'player_to_player_transfer')
-                self.assertEqual(event.actor.name, 'CJ Jones')
-                self.assertEqual(event.target.name, 'Recipient Name')
+                self.assertEqual(event.actor.name, 'CJ Jones (Account 6)')
+                self.assertEqual(event.target.name, 'Recipient Name (Account 2)')
                 self.assertEqual(event.target.source, 2)
                 self.assertEqual(event.target.characterId, 'char1:player2')
                 self.assertEqual(event.target.license, 'license:2')
