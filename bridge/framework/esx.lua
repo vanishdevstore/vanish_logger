@@ -48,6 +48,11 @@ AddEventHandler('playerDropped', function()
     forget(source)
 end)
 
+-- A recycled server id must not inherit the previous character.
+AddEventHandler('playerJoining', function()
+    forget(source)
+end)
+
 ---Returns nil for unloaded players. ESX uses the same value for
 ---identifier and characterId. Callers must not modify the result.
 ---@param playerId number FiveM server id

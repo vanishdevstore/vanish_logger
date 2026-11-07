@@ -129,10 +129,40 @@ class DeliveryTests(unittest.TestCase):
         self.assertEqual(second.requests[0][0],body)
         second.requests[0][1](202,'{"accepted":1,"duplicates":0,"rejected":0}')
         third=Runtime(disk); self.assertEqual(third.t.recovered,0)
-    def test_disk_failure_retains_logs_and_prevents_uncheckpointed_send(self):
+    def test_disk_failure_still_sends_and_reports_the_storage_error(self):
         runtime=Runtime({}); runtime.fail_storage=True; runtime.event(); runtime.flush()
-        self.assertEqual(len(runtime.requests),0); self.assertEqual(runtime.t.queue.Size(runtime.t.queue),1)
+        self.assertEqual(len(runtime.requests),1)
         self.assertIsNotNone(runtime.t.storageError)
+        self.assertTrue(runtime.t.dirty)
+        self.assertFalse(runtime.t.storageBlocked)
+    def test_failed_write_is_retried_and_a_healed_disk_clears_the_error(self):
+        runtime=Runtime({}); runtime.fail_storage=True; runtime.event(); runtime.flush()
+        saves=self.count_saves(runtime)
+        runtime.lua.execute('t:Flush(false)')
+        self.assertEqual(len(saves),1)
+        self.assertIsNone(runtime.t.storageError)
+        self.assertFalse(runtime.t.dirty)
+    def test_storage_warning_is_rate_limited(self):
+        runtime=Runtime({}); runtime.fail_storage=True
+        warnings=[]
+        runtime.lua.globals().Warn=lambda *args: warnings.append(args)
+        runtime.event(); runtime.flush()
+        for _ in range(5): runtime.lua.execute('t.dirty=true; t:Checkpoint()')
+        self.assertEqual(len(warnings),1)
+        runtime.lua.execute('function GetGameTimer() return 100000 + 60000 end')
+        runtime.lua.execute('t:Checkpoint()')
+        self.assertEqual(len(warnings),2)
+    def test_blocked_spool_still_sends_nothing(self):
+        disk={'data':json.dumps({'v':1,'queued':[],'dropped':-1})}
+        runtime=Runtime(disk); runtime.event(); runtime.flush()
+        self.assertTrue(runtime.t.storageBlocked)
+        self.assertEqual(runtime.requests,[])
+    def test_one_flush_and_its_receipt_write_the_spool_twice(self):
+        runtime=Runtime({}); saves=self.count_saves(runtime)
+        runtime.event(); runtime.flush()
+        self.assertEqual(len(saves),1)
+        runtime.requests[0][1](202,'{"accepted":1,"duplicates":0,"rejected":0}')
+        self.assertEqual(len(saves),2)
     def test_timeout_retries_and_ignores_late_old_callback(self):
         runtime=Runtime({}); runtime.event(); runtime.flush()
         old=runtime.requests[0][1]; runtime.timers[0](); runtime.flush()
@@ -224,6 +254,31 @@ class DeliveryTests(unittest.TestCase):
         body=json.loads(restored.requests[0][0])
         self.assertEqual([event['id'] for event in body['events']],['two','three'])
         self.assertEqual(body['droppedSinceLast'],1)
+
+class CharacterCacheTests(unittest.TestCase):
+    def test_player_joining_drops_the_cached_character_of_a_recycled_id(self):
+        lua = LuaRuntime(unpack_returned_tuples=True)
+        lua.execute("""
+            handlers = {}
+            reads = 0
+            source = 7
+            function AddEventHandler(name, fn) handlers[name] = fn end
+            function GetResourceState() return 'started' end
+            function GetGameTimer() return 1000 end
+            function GetPlayerName() return 'x' end
+            local esx = { GetPlayerFromId = function(id)
+                reads = reads + 1
+                return { identifier = 'char' .. reads, source = id }
+            end }
+            exports = { es_extended = { getSharedObject = function() return esx end } }
+        """)
+        lua.execute((ROOT/'bridge/framework/esx.lua').read_text())
+        self.assertEqual(lua.eval('GetCharacterInfo(7).identifier'), 'char1')
+        self.assertEqual(lua.eval('GetCharacterInfo(7).identifier'), 'char1')
+        self.assertEqual(lua.globals().reads, 1)
+        lua.execute("handlers['playerJoining']()")
+        self.assertEqual(lua.eval('GetCharacterInfo(7).identifier'), 'char2')
+        self.assertEqual(lua.globals().reads, 2)
 
 class PublicApiTests(unittest.TestCase):
     def api(self):

@@ -342,11 +342,12 @@ function Transport:Flush(force)
         return
     end
 
-    -- Checkpoint before sending so a crash can replay the batch.
-    if not self:Checkpoint() then return end
+    -- A damaged spool must not be overwritten, so nothing is sent until restart.
+    if self.storageBlocked then return end
 
     local endpoint, key = self:Credentials()
     if not endpoint or not key then
+        self:CheckpointIfDue()
         if not self.credentialsWarned then
             Warn('missing credentials or refused endpoint. Use HTTPS and set "%s" and "%s" in server.cfg. Events remain queued.',
                 Config.endpointConvar, Config.keyConvar)
@@ -359,7 +360,10 @@ function Transport:Flush(force)
     if not self.inFlight then self.inFlight = self:BuildFlight() end
     if self.inFlight then
         self.dirty = true
-        if self:Checkpoint() then self:Send(endpoint, key) end
+        -- One write covers the queue and the new batch so a crash can replay it.
+        -- A failed write still sends: losing the replay copy beats losing delivery.
+        self:Checkpoint()
+        self:Send(endpoint, key)
     end
 end
 
@@ -408,7 +412,8 @@ function Transport:Status()
 end
 
 ---Synchronously checkpoint the queue and in-flight body.
----A failed write blocks sending to preserve recoverability.
+---A failed write is reported through Status and retried on the next flush;
+---only an unreadable spool (storageBlocked) stops sending.
 ---@return boolean ok
 function Transport:Checkpoint()
     if Config.persistence == false then return true end
@@ -427,7 +432,11 @@ function Transport:Checkpoint()
     end
     if not ok or not result or not result.ok then
         self.storageError = 'Cannot checkpoint pending logs; check disk space and permissions'
-        Warn('%s', self.storageError)
+        local now = GetGameTimer()
+        if not self.storageWarnedAt or now - self.storageWarnedAt >= 60000 then
+            self.storageWarnedAt = now
+            Warn('%s', self.storageError)
+        end
         return false
     end
 

@@ -5,6 +5,21 @@ All notable changes to this resource are documented here. This project follows
 `fxmanifest.lua` is the source of truth; merging a bump to `main` publishes a
 release.
 
+## 1.3.1
+
+### Fixed
+
+- A flush writes the spool once, after the batch is built, instead of before
+  building it and again after. With the write on the response that is two
+  synchronous writes per send cycle instead of three. Each write fsyncs, which
+  measured 3 to 16 ms on a quiet SSD and 35 to 110 ms on a busy disk.
+- A failed spool write no longer stops delivery. The batch is still sent, the
+  write is retried on the next flush, `vanishlogs status` reports the storage
+  error, and the console warning is limited to once a minute. An unreadable spool
+  found at start still blocks sending so it is never overwritten.
+- A server id reused by a new player no longer logs under the previous player's
+  character: the character cache is cleared on `playerJoining`.
+
 ## 1.3.0
 
 Built for 500+ player servers. Measured end to end against a real ingest API and
