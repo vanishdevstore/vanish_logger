@@ -129,7 +129,10 @@ Everything else is up to your own resources and the exports above.
 Pending events are checkpointed to a private `.vanishlogs-spool.json` in the
 resource directory, before each send, on the flush interval, and at shutdown. A
 restart restores pending events and the exact in-flight body; the API
-deduplicates on event id, so a replayed batch is stored once. A sudden crash can
+deduplicates on event id, so a replayed batch is stored once. If a checkpoint
+write fails, sending carries on and the error shows under `storage` in
+`vanishlogs status`; a crash before the next good write can then lose the batch
+that was in flight. A sudden crash can
 still lose events queued since the last checkpoint — normally up to two seconds,
 and up to `batch.idleCheckpointInterval` (10 s) while the API is unreachable.
 
