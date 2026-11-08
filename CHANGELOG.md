@@ -5,6 +5,39 @@ All notable changes to this resource are documented here. This project follows
 `fxmanifest.lua` is the source of truth; merging a bump to `main` publishes a
 release.
 
+## 1.4.0
+
+### Security
+
+- Batches can be signed with a separate signing secret
+  (`vanishlogs_signing_secret`). Until now every request carried the ingest key
+  as a bearer token and was signed with that same key, so anyone who captured
+  one request's headers could sign new batches. With a signing secret set, a
+  request names the key by its prefix only (`X-Vanishlogs-Key-Id`) and is signed
+  with the signing secret (`X-Vanishlogs-Signature: v2=...`); the ingest key is
+  no longer transmitted and no `Authorization` header is sent. These batches are
+  always signed, whatever `Config.signRequests` says.
+- Without a signing secret nothing changes: the bearer key is sent and signed
+  as before.
+
+### Added
+
+- `vanishlogs` shows which signing is in use (`v2`, `v1` or `off`), and
+  `GetStatus` reports it as `protocol`. A rejected-credentials warning names the
+  signing secret convar too when one is set.
+
+### Upgrading
+
+1. Rotate the ingest key in the dashboard. The new key comes with a signing
+   secret, shown once.
+2. Set both convars in `server.cfg`:
+   `set vanishlogs_key "plog_..."` and `set vanishlogs_signing_secret "vlsig_..."`.
+3. Restart the resource.
+
+A key issued with a signing secret refuses unsigned and legacy (bearer) requests,
+so it does not work with logger versions older than 1.4.0. Update the resource
+before setting the new key.
+
 ## 1.3.1
 
 ### Fixed
