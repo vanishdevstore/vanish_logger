@@ -76,17 +76,20 @@ end
 ---Read credentials on each flush so convar updates apply without a restart.
 ---@return string|nil endpoint
 ---@return string|nil key
+---@return string|nil signingSecret Set when the key was issued with one (protocol v2)
 function Transport:Credentials()
     local endpoint = GetConvar(Config.endpointConvar, '')
     local key = GetConvar(Config.keyConvar, '')
+    local signingSecret = GetConvar(Config.signingSecretConvar, '')
 
     endpoint = endpoint:gsub('^%s+', ''):gsub('%s+$', ''):gsub('/+$', '')
     key = key:gsub('%s+', '')
+    signingSecret = signingSecret:gsub('%s+', '')
 
     if not allowedEndpoint(endpoint) or key == '' then
-        return nil, nil
+        return nil, nil, nil
     end
-    return endpoint, key
+    return endpoint, key, signingSecret ~= '' and signingSecret or nil
 end
 
 ---Encodes and queues an event. Returns false and counts a drop if encoding
@@ -177,10 +180,16 @@ function Transport:BuildFlight()
 end
 
 ---Signs the timestamp, nonce and body digest for replay protection.
+---With a signing secret (v2) the request is always signed and names the key by
+---its prefix; without one (v1) it is signed with the bearer key's secret.
 ---@param key string
+---@param signingSecret string|nil
 ---@param body string
 ---@return table
-local function signatureHeaders(key, body)
+local function signatureHeaders(key, signingSecret, body)
+    if signingSecret then
+        return exports[GetCurrentResourceName()]:SignLogBatchV2(key, signingSecret, body)
+    end
     if not Config.signRequests then return {} end
     return exports[GetCurrentResourceName()]:SignLogBatch(key, body)
 end
@@ -203,7 +212,9 @@ function Transport:ScheduleRetry(status)
     -- Limit warning output to the first failure and maximum-backoff attempts.
     if self.failures == 1 then
         if status == 401 or status == 403 then
-            Warn('ingest rejected the credentials (HTTP %s); check %s', status, Config.keyConvar)
+            local _, _, signingSecret = self:Credentials()
+            Warn('ingest rejected the credentials (HTTP %s); check %s', status,
+                signingSecret and (Config.keyConvar .. ' and ' .. Config.signingSecretConvar) or Config.keyConvar)
         else
             Warn('ingest returned %s; retrying with backoff', status)
         end
@@ -268,7 +279,8 @@ end
 
 ---@param endpoint string
 ---@param key string
-function Transport:Send(endpoint, key)
+---@param signingSecret string|nil
+function Transport:Send(endpoint, key, signingSecret)
     local flight = self.inFlight
     if not flight or self.sending then return end
 
@@ -278,11 +290,12 @@ function Transport:Send(endpoint, key)
     self.sending = true
 
     local headers = {
-        ['Authorization'] = 'Bearer ' .. key,
         ['Content-Type'] = 'application/json',
         ['User-Agent'] = ('vanish_logger/%s'):format(LoggerVersion),
     }
-    local signed, signature = pcall(signatureHeaders, key, flight.body)
+    -- v2 never sends the bearer key; the API refuses a request carrying both.
+    if not signingSecret then headers['Authorization'] = 'Bearer ' .. key end
+    local signed, signature = pcall(signatureHeaders, key, signingSecret, flight.body)
     if not signed then
         self.sending = false
         self.activeAttempt = nil
@@ -345,7 +358,7 @@ function Transport:Flush(force)
     -- A damaged spool must not be overwritten, so nothing is sent until restart.
     if self.storageBlocked then return end
 
-    local endpoint, key = self:Credentials()
+    local endpoint, key, signingSecret = self:Credentials()
     if not endpoint or not key then
         self:CheckpointIfDue()
         if not self.credentialsWarned then
@@ -363,7 +376,7 @@ function Transport:Flush(force)
         -- One write covers the queue and the new batch so a crash can replay it.
         -- A failed write still sends: losing the replay copy beats losing delivery.
         self:Checkpoint()
-        self:Send(endpoint, key)
+        self:Send(endpoint, key, signingSecret)
     end
 end
 
@@ -391,10 +404,11 @@ end
 
 ---@return table
 function Transport:Status()
-    local endpoint, key = self:Credentials()
+    local endpoint, key, signingSecret = self:Credentials()
     return {
         configured = endpoint ~= nil and key ~= nil,
         endpoint = endpoint or GetConvar(Config.endpointConvar, ''),
+        protocol = signingSecret and 'v2' or 'v1',
         running = self.running,
         queued = self.queue:Size(),
         queuedBytes = self.queuedBytes,

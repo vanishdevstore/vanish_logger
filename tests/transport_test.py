@@ -13,7 +13,7 @@ def ordinary_lua(source):
     return re.sub(r'(?m)^(\s*)([\w.]+)\s*([+-])=\s*(.*)$', r'\1\2 = \2 \3 (\4)', source)
 
 class Runtime:
-    def __init__(self, disk, max_queue=None):
+    def __init__(self, disk, max_queue=None, signing_secret=None):
         self.lua = LuaRuntime(unpack_returned_tuples=True)
         self.disk = disk
         self.requests = []
@@ -41,11 +41,18 @@ class Runtime:
             self.request_details.append((endpoint, plain(headers), plain(options)))
         g.py_http = http
         g.py_timer = lambda delay, callback: self.timers.append(callback)
+        g.signing_secret = signing_secret
         self.lua.execute('''
             json={encode=function(v) return py_encode(v) end,decode=function(v) return py_decode(v) end}
             function GetGameTimer() return 100000 end
             function GetCurrentResourceName() return 'test' end
-            function GetConvar(name) if name=='vanishlogs_endpoint' then return 'https://logs.example.com' else return 'plog_prefix_secret' end end
+            function GetConvar(name, default)
+                if name=='vanishlogs_endpoint' then return 'https://logs.example.com' end
+                if name=='vanishlogs_key' then return 'plog_prefix_secret' end
+                if name=='vanishlogs_signing_secret' and signing_secret then return signing_secret end
+                return default
+            end
+            signCalls={}
             function GetResourceMetadata() return '1.0.0' end
             local counter=0
             function NewId() counter=counter+1 return 'id-'..counter end
@@ -53,7 +60,12 @@ class Runtime:
             function Warn(...) end function Debug(...) end function LogError(...) end
             function CreateThread(fn) end function Wait(ms) end
             PerformHttpRequest=py_http SetTimeout=py_timer
-            exports={test={SavePendingLogs=function(_,v) return py_save(v) end,LoadPendingLogs=function() return py_load() end,SignLogBatch=function() return {} end}}
+            exports={test={SavePendingLogs=function(_,v) return py_save(v) end,LoadPendingLogs=function() return py_load() end,
+                SignLogBatch=function(_,key) signCalls[#signCalls+1]='v1 '..key return {} end,
+                SignLogBatchV2=function(_,key,secret)
+                    signCalls[#signCalls+1]='v2 '..key..' '..secret
+                    return {['X-Vanishlogs-Key-Id']='prefix',['X-Vanishlogs-Signature']='v2=stub'}
+                end}}
         ''')
         self.lua.execute((ROOT/'config.lua').read_text())
         g.Config.batch.maxEvents = 10
@@ -67,6 +79,9 @@ class Runtime:
         self.lua.globals().event_id = name
         self.lua.execute("t:Enqueue({id=event_id,occurredAt='2026-09-05T00:00:00Z',category='system',action='test'})")
     def flush(self): self.lua.execute('t:Flush(true)')
+    def sign_calls(self):
+        calls = self.lua.globals().signCalls
+        return [calls[i] for i in range(1, len(calls) + 1)]
 
 class DeliveryTests(unittest.TestCase):
     def endpoint_runtime(self, endpoint, allow_local=False):
@@ -74,9 +89,10 @@ class DeliveryTests(unittest.TestCase):
         runtime.lua.globals().test_endpoint = endpoint
         runtime.lua.globals().Config.allowLocalHttp = allow_local
         runtime.lua.execute('''
-            function GetConvar(name)
+            function GetConvar(name, default)
                 if name == 'vanishlogs_endpoint' then return test_endpoint end
-                return 'plog_prefix_secret'
+                if name == 'vanishlogs_key' then return 'plog_prefix_secret' end
+                return default
             end
         ''')
         runtime.event()
@@ -92,6 +108,55 @@ class DeliveryTests(unittest.TestCase):
         runtime.requests[0][1](302, '')
         self.assertIsNotNone(runtime.t.inFlight)
         self.assertEqual(len(runtime.requests), 1)
+
+    def test_without_a_signing_secret_the_bearer_key_is_sent_and_signed_v1(self):
+        runtime = Runtime({}); runtime.event(); runtime.flush()
+        _, headers, _ = runtime.request_details[0]
+        self.assertEqual(headers['Authorization'], 'Bearer plog_prefix_secret')
+        self.assertNotIn('X-Vanishlogs-Key-Id', headers)
+        self.assertEqual(runtime.sign_calls(), ['v1 plog_prefix_secret'])
+        self.assertEqual(runtime.t.Status(runtime.t).protocol, 'v1')
+
+    def test_a_signing_secret_sends_v2_headers_and_never_the_bearer_key(self):
+        runtime = Runtime({}, signing_secret=' vlsig_abc_def \n'); runtime.event(); runtime.flush()
+        _, headers, _ = runtime.request_details[0]
+        self.assertNotIn('Authorization', headers)
+        self.assertNotIn('plog_prefix_secret', json.dumps(headers))
+        self.assertEqual(headers['X-Vanishlogs-Key-Id'], 'prefix')
+        self.assertEqual(headers['X-Vanishlogs-Signature'], 'v2=stub')
+        self.assertEqual(headers['Content-Type'], 'application/json')
+        self.assertEqual(runtime.sign_calls(), ['v2 plog_prefix_secret vlsig_abc_def'])
+        self.assertEqual(runtime.t.Status(runtime.t).protocol, 'v2')
+
+    def test_v2_is_signed_even_with_signRequests_off(self):
+        runtime = Runtime({}, signing_secret='vlsig_abc')
+        runtime.lua.globals().Config.signRequests = False
+        runtime.event(); runtime.flush()
+        self.assertEqual(runtime.sign_calls(), ['v2 plog_prefix_secret vlsig_abc'])
+        self.assertNotIn('Authorization', runtime.request_details[0][1])
+
+    def test_v1_unsigned_when_signRequests_off_and_no_signing_secret(self):
+        runtime = Runtime({})
+        runtime.lua.globals().Config.signRequests = False
+        runtime.event(); runtime.flush()
+        self.assertEqual(runtime.sign_calls(), [])
+        self.assertEqual(runtime.request_details[0][1]['Authorization'], 'Bearer plog_prefix_secret')
+
+    def test_a_signing_secret_set_later_applies_on_the_next_send(self):
+        runtime = Runtime({}); runtime.event(); runtime.flush()
+        runtime.requests[0][1](503, 'unavailable')
+        runtime.lua.globals().signing_secret = 'vlsig_abc'
+        runtime.flush()
+        self.assertNotIn('Authorization', runtime.request_details[1][1])
+        self.assertEqual(runtime.requests[0][0], runtime.requests[1][0])
+
+    def test_v2_signing_failure_sends_nothing_and_retries(self):
+        runtime = Runtime({}, signing_secret='vlsig_abc')
+        runtime.lua.execute("exports.test.SignLogBatchV2=function() error('Invalid ingest key') end")
+        runtime.event(); runtime.flush()
+        self.assertEqual(runtime.requests, [])
+        self.assertIsNotNone(runtime.t.inFlight)
+        self.assertEqual(runtime.t.lastError, 'HTTP signing_unavailable')
 
     def test_http_is_refused_by_default_and_events_are_preserved(self):
         for endpoint in ('http://logs.example.com', 'http://127.0.0.1:8787', 'http://[::1]:8787'):

@@ -102,6 +102,8 @@ RegisterCommand('vanishlogs', function(source, args)
     local lines = {
         ('vanish_logger %s (event schema v%d)'):format(status.loggerVersion, status.schemaVersion),
         ('  configured : %s'):format(status.configured and ('yes -> ' .. status.endpoint) or 'NO - set ' .. Config.endpointConvar .. ' and ' .. Config.keyConvar),
+        ('  signing    : %s'):format(status.protocol == 'v2' and 'v2 (signing secret)'
+            or Config.signRequests and 'v1 (ingest key)' or 'off'),
         ('  framework  : %s'):format(FrameworkName() or 'none'),
         ('  inventory  : %s'):format(InventoryAdapterActive() and 'ox_inventory' or 'not collecting'),
         ('  collectors : %s'):format(#collectors > 0 and table.concat(collectors, ', ') or 'none'),

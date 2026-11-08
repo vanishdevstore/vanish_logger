@@ -8,7 +8,7 @@ function cleanup(dir) {
   rmSync(dir,{recursive:true});
 }
 const { createHmac, createHash } = require('node:crypto');
-const { createStore, signBatch } = require('../server/store.js');
+const { createStore, signBatch, signBatchV2 } = require('../server/store.js');
 
 test('a new store instance restores the exact pending bytes after restart', () => {
   const dir = mkdtempSync(join(tmpdir(), 'vanishlogs-spool-'));
@@ -32,4 +32,23 @@ test('signature uses exact API HMAC contract and fresh nonces on replay', () => 
   assert.notEqual(first['X-Vanishlogs-Nonce'],second['X-Vanishlogs-Nonce']);
   const expected=createHmac('sha256','secret_with_underscores').update(`123456789.${first['X-Vanishlogs-Nonce']}.${createHash('sha256').update(body).digest('hex')}`).digest('hex');
   assert.equal(first['X-Vanishlogs-Signature'],'v1='+expected);
+});
+test('v2 names the key by its prefix and signs with the signing secret only', () => {
+  const body='{"events":[]}', key='plog_prefix_secret_with_underscores', signingSecret='vlsig_abc-DEF_123';
+  const headers=signBatchV2(key,signingSecret,body,123456789);
+  assert.deepEqual(Object.keys(headers).sort(),
+    ['X-Vanishlogs-Key-Id','X-Vanishlogs-Nonce','X-Vanishlogs-Signature','X-Vanishlogs-Timestamp']);
+  assert.equal(headers['X-Vanishlogs-Key-Id'],'prefix');
+  assert.equal(headers['X-Vanishlogs-Timestamp'],'123456789');
+  assert.match(headers['X-Vanishlogs-Nonce'],/^[0-9a-f]{32}$/);
+  assert.ok(!JSON.stringify(headers).includes('secret_with_underscores'));
+  const message=`123456789.${headers['X-Vanishlogs-Nonce']}.${createHash('sha256').update(body).digest('hex')}`;
+  assert.equal(headers['X-Vanishlogs-Signature'],'v2='+createHmac('sha256',signingSecret).update(message).digest('hex'));
+  assert.notEqual(signBatchV2(key,signingSecret,body,123456789)['X-Vanishlogs-Nonce'],headers['X-Vanishlogs-Nonce']);
+});
+test('v2 refuses a malformed key or a missing signing secret', () => {
+  for (const key of ['', 'plog_', 'plog_prefix', 'plog__secret', 'pk_prefix_secret'])
+    assert.throws(() => signBatchV2(key,'vlsig_abc','{}'),/Invalid ingest key/);
+  for (const secret of ['', undefined, null])
+    assert.throws(() => signBatchV2('plog_prefix_secret',secret,'{}'),/Missing signing secret/);
 });
