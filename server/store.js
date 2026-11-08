@@ -64,12 +64,11 @@ function createStore(directory) {
   };
 }
 
-// Keys use plog_<prefix>_<secret>. Sign with the secret portion only.
-// The signature covers the timestamp, nonce and body hash.
-function signBatch(key, body, now = Date.now()) {
-  const match = /^plog_[^_]+_(.+)$/.exec(key);
-  if (!match) throw Error('Invalid ingest key');
+// Keys use plog_<prefix>_<secret>. The prefix names the key; the secret may contain '_'.
+const KEY_PATTERN = /^plog_([^_]+)_(.+)$/;
 
+// The signature covers the timestamp, nonce and body hash.
+function signedHeaders(version, secret, body, now) {
   const timestamp = String(now);
   const nonce = randomBytes(16).toString('hex');
   const hash = createHash('sha256').update(body).digest('hex');
@@ -78,8 +77,24 @@ function signBatch(key, body, now = Date.now()) {
     'X-Vanishlogs-Timestamp': timestamp,
     'X-Vanishlogs-Nonce': nonce,
     'X-Vanishlogs-Signature':
-      'v1=' + createHmac('sha256', match[1]).update(`${timestamp}.${nonce}.${hash}`).digest('hex'),
+      `${version}=` + createHmac('sha256', secret).update(`${timestamp}.${nonce}.${hash}`).digest('hex'),
   };
+}
+
+// v1: sent with the bearer key, signed with its secret portion.
+function signBatch(key, body, now = Date.now()) {
+  const match = KEY_PATTERN.exec(key);
+  if (!match) throw Error('Invalid ingest key');
+  return signedHeaders('v1', match[2], body, now);
+}
+
+// v2: names the key by its prefix and signs with the separate signing secret,
+// so the request carries no bearer secret at all.
+function signBatchV2(key, signingSecret, body, now = Date.now()) {
+  const match = KEY_PATTERN.exec(key);
+  if (!match) throw Error('Invalid ingest key');
+  if (typeof signingSecret !== 'string' || signingSecret === '') throw Error('Missing signing secret');
+  return { 'X-Vanishlogs-Key-Id': match[1], ...signedHeaders('v2', signingSecret, body, now) };
 }
 
 // Only inside FXServer. The tests require this file directly.
@@ -88,6 +103,7 @@ if (typeof GetCurrentResourceName === 'function') {
   global.exports('LoadPendingLogs', () => store.load());
   global.exports('SavePendingLogs', (data) => store.save(data));
   global.exports('SignLogBatch', (key, body) => signBatch(key, body));
+  global.exports('SignLogBatchV2', (key, signingSecret, body) => signBatchV2(key, signingSecret, body));
 }
 
-module.exports = { createStore, signBatch };
+module.exports = { createStore, signBatch, signBatchV2 };

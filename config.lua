@@ -1,7 +1,11 @@
 -- Set credentials in server.cfg:
 --
---   set vanishlogs_endpoint "https://logs.example.com"
---   set vanishlogs_key      "plog_xxxxxxxx_yyyyyyyy"
+--   set vanishlogs_endpoint       "https://logs.example.com"
+--   set vanishlogs_key            "plog_xxxxxxxx_yyyyyyyy"
+--   set vanishlogs_signing_secret "vlsig_..."
+--
+-- The signing secret is shown once when a key is issued. With it set, batches
+-- are signed with it and the key itself is never sent.
 
 Config = {
     -- Enable transport debug output for troubleshooting.
@@ -9,6 +13,7 @@ Config = {
 
     endpointConvar = 'vanishlogs_endpoint',
     keyConvar = 'vanishlogs_key',
+    signingSecretConvar = 'vanishlogs_signing_secret',
 
     -- Test servers only: allow HTTP to literal 127.0.0.1 or [::1].
     allowLocalHttp = false,
@@ -54,6 +59,7 @@ Config = {
     },
 
     -- Production ingest requires an HMAC on every batch. Leave this on.
+    -- Ignored when a signing secret is set: those batches are always signed.
     signRequests = true,
 
     -- Gameplay collected from events the server and common resources already

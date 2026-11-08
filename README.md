@@ -30,7 +30,7 @@ resource still runs and the `Log` exports still work for your own scripts.
    and unzip it into your server's `resources/` directory.
 2. Add `ensure vanish_logger` to `server.cfg`. If you run `ox_inventory`, start
    it before this resource.
-3. Set the endpoint and key (below), then restart.
+3. Set the endpoint, key and signing secret (below), then restart.
 
 Run `vanishlogs` in the server console to confirm it is connected, and
 `vanishlogs top` to see which events are busiest.
@@ -42,25 +42,48 @@ resource** — deliberately, so the key cannot end up in a folder that gets
 zipped, copied to another server, or committed.
 
 ```cfg
-set vanishlogs_endpoint "https://your-vanish-logs-host"
-set vanishlogs_key      "plog_xxxxxxxx_yyyyyyyy"
+set vanishlogs_endpoint       "https://your-vanish-logs-host"
+set vanishlogs_key            "plog_xxxxxxxx_yyyyyyyy"
+set vanishlogs_signing_secret "vlsig_..."
 ```
 
 Use an HTTPS endpoint; the resource posts to `<endpoint>/ingest/v1/events`.
 Trailing slashes are removed. URLs containing credentials, queries or fragments
-are refused, and redirects are not followed. The key is issued from the dashboard.
+are refused, and redirects are not followed. The key and its signing secret are
+issued from the dashboard; the signing secret is shown once.
 
 For local testing only, set `Config.allowLocalHttp = true` to allow HTTP to
 literal `127.0.0.1` or `[::1]`, with an optional port. Remote HTTP is always
-refused. Keep the ingest key in a server-only `set` convar; never use `setr` or `sets`.
+refused. Keep the ingest key and signing secret in server-only `set` convars;
+never use `setr` or `sets`.
 
 Everything else lives in [`config.lua`](config.lua), documented inline: batching
 thresholds, retry timing, inventory detail, and whether to record coordinates.
 
-Request signing (`signRequests`) is on by default because production ingest
-requires an HMAC on every batch. Do not turn it off in production. The signature
-binds the timestamp, a unique nonce, and the SHA-256 digest of the exact request
-body to the secret half of the ingest key.
+### Request signing
+
+Every batch carries an HMAC-SHA256 over its timestamp, a unique nonce and the
+SHA-256 digest of the exact request body. Which secret signs it depends on
+whether `vanishlogs_signing_secret` is set:
+
+- **Signing secret set (protocol v2).** The request names the key by its prefix
+  (`X-Vanishlogs-Key-Id`) and is signed with the signing secret
+  (`X-Vanishlogs-Signature: v2=...`). The ingest key is never transmitted and no
+  `Authorization` header is sent, so a captured request cannot be used to sign
+  new batches. These batches are always signed, whatever `signRequests` says.
+- **No signing secret (v1).** The ingest key is sent as a bearer token and the
+  batch is signed with its secret half (`v1=...`). `signRequests` is on by
+  default because production ingest requires it; do not turn it off in
+  production.
+
+`vanishlogs` shows which one is in use. Convars are read on every flush, so a
+changed key or signing secret applies without a restart.
+
+To move an existing server to a signing secret: update this resource to 1.4.0
+or newer, rotate the key in the dashboard (the new key comes with a signing
+secret), set both `vanishlogs_key` and `vanishlogs_signing_secret`, and restart
+the resource. A key issued with a signing secret refuses unsigned and bearer
+requests, so it does not work with logger versions older than 1.4.0.
 
 ## Logging from your own resources
 
